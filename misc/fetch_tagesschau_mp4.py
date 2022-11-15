@@ -5,6 +5,7 @@ __description__ = """Given a URL and a destination dir, fetch the tagesschau in 
 
 import argparse
 import logging
+from msilib.schema import File
 import os
 import re
 
@@ -31,6 +32,10 @@ parser.add_argument("--video-format",
                     type=str,
                     default="mp4",
                     help="Format to recode video to")
+parser.add_argument("--video-sample-rate",
+                    type=float,
+                    default=0.5,
+                    help="Rate at which to capture frames of video which will be placed in separate directory. Rate is defined in pictures per second, e.g. 0.5 meaning 1 image every 2 seconds")
 parser.add_argument("-v", 
                     "--verbose",
                     default=False,
@@ -41,15 +46,29 @@ args = parser.parse_args()
 logging.basicConfig(level=logging.DEBUG) if args.verbose else logging.basicConfig(level=logging.INFO)
 log = logging.getLogger()
 
+if not os.path.isabs(args.ffmpeg_location):
+    args.ffmpeg_location = os.path.join(os.getcwd(), args.ffmpeg_location)
+
+if not os.path.isfile(args.ffmpeg_location):
+    raise FileNotFoundError(f"ffmpeg not found in {args.ffmpeg_location}")
+
 if not os.path.isdir(args.download_dir):
     log.info(f"Creating download dir {args.download_dir}")
     os.mkdir(args.download_dir)
 os.chdir(args.download_dir)
+root_dir = os.getcwd()
+
+for directory in ("original","downscaled","sample_images"):
+    try:
+        os.mkdir(os.path.join(root_dir, directory))
+    except FileExistsError:
+        continue
+os.chdir(os.path.join(root_dir, "original"))
 
 match = re.match(r"^https://www.srf.ch/[a-z0-9-].*/([a-z0-9-].*)\?.*$", args.url)
 show_name = match.group(1)
 if show_name is None:
-    show_name = "deleteme"
+    raise ValueError(f"Failed to grab show name from url {args.url}, checking with first group of regex ^https://www.srf.ch/[a-z0-9-].*/([a-z0-9-].*)\?.*$")
 
 ydl_opts = {
     "quiet": False if args.verbose else True,
@@ -57,14 +76,18 @@ ydl_opts = {
     "outtmpl": f"{show_name}.{args.video_format}"
 }
 
-if args.ffmpeg_location:
-    ydl_opts.update({"ffmpeg_location": f"{args.ffmpeg_location}"})
-
 with youtube_dl.YoutubeDL(ydl_opts) as ydl:
     log.info(f"Downloading {args.url} into {args.download_dir}")
     ydl.download([args.url])
 
-stream = ffmpeg.input(f"{show_name}.{args.video_format}")
+os.chdir(os.path.join(root_dir, "downscaled"))
+stream = ffmpeg.input(f"{os.path.join(root_dir, 'original')}/{show_name}.{args.video_format}")
 stream = ffmpeg.filter(stream, "scale", w="440",h="330",force_original_aspect_ratio="decrease")
 stream = ffmpeg.output(stream, f"{show_name}_downscaled.{args.video_format}")
+ffmpeg.run(stream, cmd=args.ffmpeg_location)
+
+os.chdir(os.path.join(root_dir, "sample_images"))
+stream = ffmpeg.input(f"{os.path.join(root_dir, 'original')}/{show_name}.{args.video_format}")
+stream = ffmpeg.filter(stream, "fps", fps=args.video_sample_rate, round="up")
+stream = ffmpeg.output(stream, f"{show_name}_%d.jpg")
 ffmpeg.run(stream, cmd=args.ffmpeg_location)
