@@ -21,7 +21,7 @@ parser.add_argument("-u",
 parser.add_argument("-d",
                     "--download-dir",
                     type=str,
-                    default="./",
+                    default=None,
                     help="Destination dir for video files")
 parser.add_argument("-m",
                     "--ffmpeg-location",
@@ -52,23 +52,26 @@ if not os.path.isabs(args.ffmpeg_location):
 if not os.path.isfile(args.ffmpeg_location):
     raise FileNotFoundError(f"ffmpeg not found in {args.ffmpeg_location}")
 
+match = re.match(r"^https://www.srf.ch/[a-z0-9-].*/([a-z0-9-].*)\?.*$", args.url)
+show_name = match.group(1)
+if show_name is None:
+    raise ValueError(f"Failed to grab show name from url {args.url}, checking with first group of regex ^https://www.srf.ch/[a-z0-9-].*/([a-z0-9-].*)\?.*$")
+
+if args.download_dir is None:
+    args.download_dir = show_name
+
 if not os.path.isdir(args.download_dir):
     log.info(f"Creating download dir {args.download_dir}")
     os.mkdir(args.download_dir)
 os.chdir(args.download_dir)
 root_dir = os.getcwd()
 
-for directory in ("original","downscaled","sample_images"):
+for directory in ("original","downscaled","images", "labels"):
     try:
         os.mkdir(os.path.join(root_dir, directory))
     except FileExistsError:
         continue
 os.chdir(os.path.join(root_dir, "original"))
-
-match = re.match(r"^https://www.srf.ch/[a-z0-9-].*/([a-z0-9-].*)\?.*$", args.url)
-show_name = match.group(1)
-if show_name is None:
-    raise ValueError(f"Failed to grab show name from url {args.url}, checking with first group of regex ^https://www.srf.ch/[a-z0-9-].*/([a-z0-9-].*)\?.*$")
 
 ydl_opts = {
     "quiet": False if args.verbose else True,
