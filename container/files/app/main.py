@@ -3,21 +3,22 @@
 import os
 import shutil
 import logging
-import glob
 import uuid
+import re
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2" #tf is really noisy otherwise
 import tensorflow as tf
 from tensorflow import keras
 import argparse
 import cv2 as cv
+import pytesseract
 import numpy as np
 
 class SampledImage:
-    tagesschau_class_mapping = {0: "default",
-                                1: "description_overlay",
-                                2: "name_overlay",
-                                3:"logo_overlay"}
+    prediction_labels = {"default": 0,
+                         "description_overlay": 1,
+                         "name_overlay": 2,
+                         "logo_overlay": 3}
 
     def __init__(self, data, video_filepath, frame_number, frame_ms):
         self.data = data 
@@ -25,6 +26,7 @@ class SampledImage:
         self.frame_number = frame_number
         self.frame_ms = frame_ms
         self.prediction = None
+        self.text_by_label = {label: "" for label in SampledImage.prediction_labels.keys()}
 
     def as_predictable(self, normalize=True, expand=True, resize_x=256, resize_y=256):
         img = self.data
@@ -38,10 +40,35 @@ class SampledImage:
             img = np.expand_dims(img, 0)
         return img
 
-    def apply_mask(self, show_only_this_class, mask_value=0):
+    def recognize_text(self,
+                       predict_text_in_labels=["name_overlay", "description_overlay"],
+                       prediction_languages=["deu","fra","eng"],
+                       prune_chars_regex=r"[\x00-\x1f\x7f-\x9f\|\_]",
+                       debug_image_dir=None):
+        """
+        For each item in predict_text_in_labels:
+          Apply a mask on the image, ensuring only pixels of class $item are visible
+          Apply ocr on masked picture
+          Write text data to self.text_by_label and return
+        """
+        tesseract_languages = "+".join(prediction_languages)
+        for label in predict_text_in_labels:
+            if label not in SampledImage.prediction_labels.keys():
+                raise ValueError(f"Cannot predict text for unknown label {label}")
+            masked_img = self.apply_mask(show_class=SampledImage.prediction_labels[label])
+            text = pytesseract.image_to_string(masked_img, lang=tesseract_languages)
+            if debug_image_dir:
+                img_path = os.path.join(debug_image_dir, f"framenr_{self.frame_number}_framems_{self.frame_ms}.jpg")
+            if prune_chars_regex:
+                text = re.sub(prune_chars_regex, '', text)
+            self.text_by_label[label] = text
+        return self.text_by_label
+
+
+    def apply_mask(self, show_class, mask_value=0, convert_to_black_white=True, black_white_threshold=130, invert_colors=True):
         """
         Resize self.prediction to the size of self.data
-        If a pixel on self.prediction has a value listed in mask_classes:
+        If a pixel on self.prediction has a value not equals show_class:
             Zero the corresponding pixel in self.data
         """
         if self.prediction is None:
@@ -52,7 +79,11 @@ class SampledImage:
         data_dimension_x, data_dimension_y = self.data.shape[1], self.data.shape[0]
         upscaled_prediction = cv.resize(self.prediction, (data_dimension_x, data_dimension_y))
         upscaled_prediction = np.expand_dims(upscaled_prediction, 2) #self.data has a third dimension for RGB, equal shapes required for np.where
-        return np.where(upscaled_prediction == show_only_this_class, self.data, 0) 
+        masked_img = np.where(upscaled_prediction == show_class, self.data, 0) 
+        if convert_to_black_white:
+            masked_img = cv.cvtColor(masked_img, cv.COLOR_BGR2GRAY)
+            _, masked_img = cv.threshold(masked_img, black_white_threshold, 255, cv.THRESH_BINARY_INV if invert_colors else cv.THRESH_BINARY)
+        return masked_img
 
 
 parser = argparse.ArgumentParser()
@@ -83,6 +114,14 @@ parser.add_argument("--video-filepath",
                     type=str,
                     default="./tagesschau-vom-04-12-2022-mittagsausgabe.mp4", #TODO deleteme
                     help="Path of video file to classify.")
+parser.add_argument("--tesseract-filepath",
+                    type=str,
+                    default="/usr/bin/tesseract",
+                    help="Path to tesseract ocr binary.")
+parser.add_argument("--tesseract-languages",
+                    action="append",
+                    default=["deu","eng","fra"],
+                    help="Languages to configure tesseract with, see https://tesseract-ocr.github.io/tessdoc/Data-Files-in-different-versions.html")
 parser.add_argument("-v",
                     "--verbose",
                     default=False,
@@ -90,7 +129,10 @@ parser.add_argument("-v",
                     help="Verbose output")
 args = parser.parse_args()
 
+
 tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.WARN)
+pytesseract.pytesseract.tesseract_cmd = args.tesseract_filepath
+
 logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                     format="%(asctime)s - %(message)s",
                     datefmt="%d-%b-%y %H:%M:%S")
@@ -101,6 +143,9 @@ if not os.access(args.video_filepath, os.R_OK):
 
 if not os.access(args.model_filepath, os.R_OK):
   raise FileNotFoundError(f"Failed to open classification model at {args.model_filepath}")
+
+if not os.access(args.tesseract_filepath, os.X_OK):
+  raise FileNotFoundError(f"Failed to execute tesseract at {args.tesseract_filepath}")
 
 try:
   shutil.rmtree(args.temp_dir)
@@ -136,7 +181,7 @@ while True:
       log.debug(f"Sampled frame {frame_counter} at {timestamp:0.0f} ms")
   else:
     raise Exception(f"CV2 failed to read from video {args.video_filepath}")
-  if counter > 300:
+  if counter > 600:
     break
   counter += 1
   frame_counter += 1
@@ -144,19 +189,9 @@ while True:
 model = keras.models.load_model(args.model_filepath)
 
 for sampled_image in sampled_images:
-  test_img = sampled_image.as_predictable(resize_x=args.model_input_size_x, resize_y=args.model_input_size_y)
-  prediction = model.predict(test_img)
+  input_img = sampled_image.as_predictable(resize_x=args.model_input_size_x, resize_y=args.model_input_size_y)
+  prediction = model.predict(input_img, verbose=1 if args.verbose else 0)
   sampled_image.prediction = np.argmax(prediction, axis=3).astype(np.uint8)[0,:,:]
+  text_by_label = sampled_image.recognize_text()
+  log.info(f"Text detected for image at frame {sampled_image.frame_number}: {text_by_label}")
 
-
-cv.imwrite(f"./masked.jpg", sampled_image.apply_mask(2))
-exit()
-from matplotlib import pyplot as plt
-plt.figure(figsize=(12, 8))
-plt.subplot(231)
-plt.title(f"Testing Image")
-plt.imshow(test_img[:,:,0], cmap='gray')
-plt.subplot(232)
-plt.title('Prediction on test image')
-plt.imshow(sampled_image.prediction, cmap='jet')
-plt.savefig("out.png")
