@@ -13,6 +13,77 @@ import argparse
 import cv2 as cv
 import pytesseract
 import numpy as np
+import jellyfish
+from webvtt import WebVTT, Caption  #webvtt-py==0.4.6
+from webvtt.writers import WebVTTWriter, SRTWriter
+import uvicorn
+from fastapi import FastAPI, HTTPException, Path, Query, Request, File, UploadFile
+
+
+class Subtitle:
+    #constructs a vtt or srt formatted set of subtitles
+    #image gets parsed, self.text_by_label now available
+    #combine all labels (name and description itc) into one string
+    #check if previous subtitle is similar / equal:
+      #extend the previous
+    #add subtitle at timestamp frame_ms
+        
+    def __init__(self, jaro_distance_threshold=0.85):
+        self.jaro_distance_threshold = jaro_distance_threshold
+        self.elements = []
+
+    def append(self, text, offset_ms, duration_ms, extend_if_similar=True):
+        if self.elements:
+            if extend_if_similar:
+                previous_index = len(self.elements) - 1
+                if self.is_similar(text, self.elements[previous_index]["text"]):
+                    #If the subtitles are similar theres a good chance that OCR bugged out so we keep the previous subtitle.
+                    #The previous subtitle might be buggy but at least we dont change every few secs.
+                    log.debug(f"Extending subtitle due to similarity with image at offset {offset_ms} ms")
+                    self.extend_duration(index=previous_index, duration_ms=duration_ms)
+                    return
+        log.debug(f"Adding subtitle for image at offset {offset_ms} ms: {text}")
+        self.elements.append({"text": text,
+                              "offset_ms": offset_ms,
+                              "duration_ms": duration_ms})
+
+    def is_similar(self, text, previous_text):
+        return jellyfish.jaro_distance(text, previous_text) > self.jaro_distance_threshold
+
+    def extend_duration(self, index, duration_ms):
+        """
+        extends the lifetime of the subtitle at index by duration_ms
+        """
+        self.elements[index]["duration_ms"] += duration_ms
+
+    def convert_from_ms(self, milliseconds):
+        seconds, milliseconds = divmod(milliseconds,1000)
+        minutes, seconds = divmod(seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        days, hours = divmod(hours, 24)
+        seconds = seconds + milliseconds/1000
+        return f"{int(hours):02}:{int(minutes):02}:{int(seconds):02}.{int(milliseconds):04}"
+
+    def generate(self, formatting="vtt"):
+        vtt = WebVTT()
+        for subtitle in self.elements:
+            offset_ms = subtitle.get("offset_ms")
+            duration_ms = subtitle.get("duration_ms")
+            start_caption_ms = offset_ms
+            end_caption_ms = offset_ms + duration_ms
+            caption = subtitle.get("text")
+            vtt.captions.append(Caption(
+                self.convert_from_ms(start_caption_ms),
+                self.convert_from_ms(end_caption_ms),
+                (caption,))
+            )
+        if formatting == "vtt":
+            return vtt.content
+        elif formatting == "srt":
+            pass
+        else:
+            raise ValueError(f"Unknown subtitle format {formatting}")
+
 
 class SampledImage:
     prediction_labels = {"default": 0,
@@ -26,7 +97,7 @@ class SampledImage:
         self.frame_number = frame_number
         self.frame_ms = frame_ms
         self.prediction = None
-        self.text_by_label = {label: "" for label in SampledImage.prediction_labels.keys()}
+        self.text_by_label = {}
 
     def as_predictable(self, normalize=True, expand=True, resize_x=256, resize_y=256):
         img = self.data
@@ -43,7 +114,7 @@ class SampledImage:
     def recognize_text(self,
                        predict_text_in_labels=["name_overlay", "description_overlay"],
                        prediction_languages=["deu","fra","eng"],
-                       prune_chars_regex=r"[\x00-\x1f\x7f-\x9f\|\_]",
+                       prune_chars_regex=[r"[\x00-\x1f\x7f-\x9f\|\_]"],
                        debug_image_dir=None):
         """
         For each item in predict_text_in_labels:
@@ -55,17 +126,22 @@ class SampledImage:
         for label in predict_text_in_labels:
             if label not in SampledImage.prediction_labels.keys():
                 raise ValueError(f"Cannot predict text for unknown label {label}")
-            masked_img = self.apply_mask(show_class=SampledImage.prediction_labels[label])
+            if label == "description_overlay": #descriptions are black text on grey background, hardcoded here due to project time constraints
+                masked_img = self.apply_mask(show_class=SampledImage.prediction_labels[label], black_white_threshold=140, invert_colors=False)
+            else:
+                masked_img = self.apply_mask(show_class=SampledImage.prediction_labels[label])
             text = pytesseract.image_to_string(masked_img, lang=tesseract_languages)
+            for regex in prune_chars_regex:
+                text = re.sub(regex, '', text)
             if debug_image_dir:
-                img_path = os.path.join(debug_image_dir, f"framenr_{self.frame_number}_framems_{self.frame_ms}.jpg")
-            if prune_chars_regex:
-                text = re.sub(prune_chars_regex, '', text)
+                debug_img_path = os.path.join(debug_image_dir, f"framenr_{self.frame_number}_framems_{self.frame_ms}_label_{label}.jpg")
+                log.debug(f"Writing masked image to {debug_img_path} (Text: {text})")
+                cv.imwrite(debug_img_path, masked_img)
             self.text_by_label[label] = text
         return self.text_by_label
 
 
-    def apply_mask(self, show_class, mask_value=0, convert_to_black_white=True, black_white_threshold=130, invert_colors=True):
+    def apply_mask(self, show_class, mask_value=0, convert_to_black_white=True, black_white_threshold=120, invert_colors=True):
         """
         Resize self.prediction to the size of self.data
         If a pixel on self.prediction has a value not equals show_class:
@@ -127,11 +203,16 @@ parser.add_argument("-v",
                     default=False,
                     action="store_true",
                     help="Verbose output")
+parser.add_argument('--port',
+                    type=int,
+                    default=int(environ.get("APP_PORT", 8080)),
+                    help="run api on this port")
 args = parser.parse_args()
 
 
 tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.WARN)
 pytesseract.pytesseract.tesseract_cmd = args.tesseract_filepath
+__version__ = "1.0"
 
 logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                     format="%(asctime)s - %(message)s",
@@ -155,9 +236,33 @@ except FileNotFoundError:
 TEMP_DIR = os.path.join(args.temp_dir, str(uuid.uuid4()))
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-log.info(f"Classifying video data from {args.video_filepath} with sampling rate of {args.sampling_rate} fps")
+app = FastAPI(title="SRF Tagesschau Classifier 9000",
+              description="Samples image data from tagesschau sessions and adds subtitle cues for text presented in overlays",
+              version=__version__,
+              contact={"name": "Armon Dressler",
+                       "url": "https://github.com/armondressler/srf-presenter-detector",
+                       "email": "armon.dressler@stud.hslu.ch"})
 
-#validate POST request, check if its a supported video format
+@app.get("/version")
+async def version():
+    return __version__
+
+@app.get("/generate-vtt")
+def upload(file: UploadFile = File(...)):
+    try:
+        with open(os.path.join(TEMP_DIR, file.filename), 'wb') as f:
+            shutil.copyfileobj(file.file, f)
+    except Exception:
+        return {"message": "There was an error uploading the file"}
+    finally:
+        file.file.close()
+    return {"message": f"Successfully uploaded {file.filename}"}
+
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=args.port, log_level="debug" if args.verbose else "info")
+
+"""
+log.info(f"Classifying video data from {args.video_filepath} with sampling rate of {args.sampling_rate} fps")
 
 cap = cv.VideoCapture(args.video_filepath)
 fps = round(cap.get(cv.CAP_PROP_FPS))
@@ -181,17 +286,24 @@ while True:
       log.debug(f"Sampled frame {frame_counter} at {timestamp:0.0f} ms")
   else:
     raise Exception(f"CV2 failed to read from video {args.video_filepath}")
-  if counter > 600:
+  if counter > 1420:
     break
   counter += 1
   frame_counter += 1
 
 model = keras.models.load_model(args.model_filepath)
-
+subtitle = Subtitle()
 for sampled_image in sampled_images:
   input_img = sampled_image.as_predictable(resize_x=args.model_input_size_x, resize_y=args.model_input_size_y)
   prediction = model.predict(input_img, verbose=1 if args.verbose else 0)
   sampled_image.prediction = np.argmax(prediction, axis=3).astype(np.uint8)[0,:,:]
-  text_by_label = sampled_image.recognize_text()
-  log.info(f"Text detected for image at frame {sampled_image.frame_number}: {text_by_label}")
+  text_by_label = sampled_image.recognize_text(prune_chars_regex=[r"^\s*.{,2}\s*$",r"[\x00-\x1f\x7f-\x9f\|\_]"], debug_image_dir="./temp")
+  name_text = text_by_label.get('name_overlay').strip() + " " if text_by_label.get('name_overlay') else ""
+  description_text = f"({text_by_label.get('description_overlay').strip()})" if text_by_label.get('description_overlay') else ""
+  subtitle_text = name_text + description_text
+  if subtitle_text:
+      subtitle.append(subtitle_text, offset_ms=sampled_image.frame_ms, duration_ms=1.0/args.sampling_rate*1000)
 
+print("SUBTITLES: ")
+print(subtitle.generate())
+"""
