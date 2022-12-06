@@ -134,7 +134,7 @@ class SampledImage:
             for regex in prune_chars_regex:
                 text = re.sub(regex, '', text)
             if masked_images_dir:
-                debug_img_path = os.path.join(masked_images_dir, f"framenr_{self.frame_number}_framems_{self.frame_ms}_label_{label}.jpg")
+                debug_img_path = os.path.join(masked_images_dir, f"framenr_{self.frame_number}_framems_{int(self.frame_ms)}_label_{label}.jpg")
                 log.debug(f"Writing masked image to {debug_img_path} (Text: {text})")
                 cv.imwrite(debug_img_path, masked_img)
             self.text_by_label[label] = text
@@ -185,7 +185,7 @@ parser.add_argument("--temp-dir",
 parser.add_argument("--masked-images-dir",
                     type=str,
                     default="",
-                    help="Useful for debuggin, directory to place masked images in.")
+                    help="Useful for debugging, directory to place masked images in.")
 parser.add_argument("--sampling-rate",
                     type=float,
                     default=0.4,
@@ -295,6 +295,7 @@ def process_videofile(filepath, temp_dir="/tmp", sampling_rate=0.4, tesseract_la
     subtitle = Subtitle()
     for sampled_image in sampled_images:
         input_img = sampled_image.as_predictable(resize_x=args.model_input_size_x, resize_y=args.model_input_size_y)
+        log.debug(f"Running segmentation with model {args.model_filepath} for frame {sampled_image.frame_number}")
         prediction = model.predict(input_img, verbose=1 if args.verbose else 0)
         sampled_image.prediction = np.argmax(prediction, axis=3).astype(np.uint8)[0,:,:]
 
@@ -312,6 +313,8 @@ if __name__ == "__main__":
     if args.interactive:
         temp_dir = os.path.join(args.temp_dir, str(uuid.uuid4()))
         os.makedirs(temp_dir, exist_ok=True)
-        process_videofile(filepath=args.video_filepath, temp_dir=temp_dir, sampling_rate=args.sampling_rate, masked_images_dir=args.masked_images_dir)
+        subtitles = process_videofile(filepath=args.video_filepath, temp_dir=temp_dir, sampling_rate=args.sampling_rate, masked_images_dir=args.masked_images_dir)
+        log.info("Processing done, outputting subtitles")
+        print(f"\n{subtitles}")
     else:
         uvicorn.run("main:app", host="0.0.0.0", port=args.port, log_level="debug" if args.verbose else "info")

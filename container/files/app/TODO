@@ -1,0 +1,5 @@
+#cut mp4
+ffmpeg -ss 00:00:00 -i "tagesschau-vom-04-12-2022-mittagsausgabe.mp4" -to 00:02:00 -c copy 120.mp4
+
+#dnf install feh
+#feh ./temp/framenr_200_framems_8000_label_name_overlay.jpg
