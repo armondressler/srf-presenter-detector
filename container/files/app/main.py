@@ -115,7 +115,7 @@ class SampledImage:
                        predict_text_in_labels=["name_overlay", "description_overlay"],
                        prediction_languages=["deu","fra","eng"],
                        prune_chars_regex=[r"[\x00-\x1f\x7f-\x9f\|\_]"],
-                       debug_image_dir=None):
+                       masked_images_dir=None):
         """
         For each item in predict_text_in_labels:
           Apply a mask on the image, ensuring only pixels of class $item are visible
@@ -133,8 +133,8 @@ class SampledImage:
             text = pytesseract.image_to_string(masked_img, lang=tesseract_languages)
             for regex in prune_chars_regex:
                 text = re.sub(regex, '', text)
-            if debug_image_dir:
-                debug_img_path = os.path.join(debug_image_dir, f"framenr_{self.frame_number}_framems_{self.frame_ms}_label_{label}.jpg")
+            if masked_images_dir:
+                debug_img_path = os.path.join(masked_images_dir, f"framenr_{self.frame_number}_framems_{self.frame_ms}_label_{label}.jpg")
                 log.debug(f"Writing masked image to {debug_img_path} (Text: {text})")
                 cv.imwrite(debug_img_path, masked_img)
             self.text_by_label[label] = text
@@ -182,6 +182,10 @@ parser.add_argument("--temp-dir",
                     type=str,
                     default="./tmp_files",
                     help="Directory to place temporary files in.")
+parser.add_argument("--masked-images-dir",
+                    type=str,
+                    default="",
+                    help="Useful for debuggin, directory to place masked images in.")
 parser.add_argument("--sampling-rate",
                     type=float,
                     default=0.4,
@@ -203,10 +207,14 @@ parser.add_argument("-v",
                     default=False,
                     action="store_true",
                     help="Verbose output")
+parser.add_argument("--interactive",
+                    default=False,
+                    action="store_true",
+                    help="Dont launch fastapi server")
 parser.add_argument('--port',
                     type=int,
-                    default=int(environ.get("APP_PORT", 8080)),
-                    help="run api on this port")
+                    default=int(os.environ.get("APP_PORT", 8080)),
+                    help="Run api on this port.")
 args = parser.parse_args()
 
 
@@ -233,8 +241,6 @@ try:
 except FileNotFoundError:
   pass
 
-TEMP_DIR = os.path.join(args.temp_dir, str(uuid.uuid4()))
-os.makedirs(TEMP_DIR, exist_ok=True)
 
 app = FastAPI(title="SRF Tagesschau Classifier 9000",
               description="Samples image data from tagesschau sessions and adds subtitle cues for text presented in overlays",
@@ -247,63 +253,65 @@ app = FastAPI(title="SRF Tagesschau Classifier 9000",
 async def version():
     return __version__
 
-@app.get("/generate-vtt")
-def upload(file: UploadFile = File(...)):
+@app.post("/generate-vtt")
+async def generate_vtt(file: UploadFile = File(...)):
+    temp_dir = os.path.join(args.temp_dir, str(uuid.uuid4()))
+    os.makedirs(temp_dir, exist_ok=True)
+    video_filepath = os.path.join(temp_dir, file.filename)
     try:
-        with open(os.path.join(TEMP_DIR, file.filename), 'wb') as f:
+        with open(video_filepath, 'wb') as f:
             shutil.copyfileobj(file.file, f)
-    except Exception:
+    except FileNotFoundError:
         return {"message": "There was an error uploading the file"}
     finally:
         file.file.close()
-    return {"message": f"Successfully uploaded {file.filename}"}
+    subtitles = process_videofile(filepath=video_filepath, temp_dir=temp_dir)
+    return {"VTT": f"{subtitles}"}
+
+def process_videofile(filepath, temp_dir="/tmp", sampling_rate=0.4, tesseract_languages=["deu","fra","eng"], masked_images_dir=None):
+    log.info(f"Classifying video data from {filepath} with sampling rate of {args.sampling_rate} fps")
+    
+    cap = cv.VideoCapture(filepath)
+    fps = round(cap.get(cv.CAP_PROP_FPS))
+    hop = round(fps / sampling_rate)
+    log.info(f"Video has {fps} fps, sampling every {hop}th frame.")
+    
+    sampled_images = []
+    frame_read_success, frame = cap.read()
+    frame_counter = 0
+
+    while frame_read_success:
+        if frame_counter % hop == 0:
+            timestamp = cap.get(cv.CAP_PROP_POS_MSEC)
+            sampled_images.append(SampledImage(data=frame,
+                                               video_filepath=args.video_filepath,
+                                               frame_number=frame_counter,
+                                               frame_ms=timestamp))
+            log.debug(f"Sampled frame {frame_counter} at {timestamp:0.0f} ms")
+        frame_read_success, frame = cap.read()
+        frame_counter += 1
+    
+    model = keras.models.load_model(args.model_filepath)
+    subtitle = Subtitle()
+    for sampled_image in sampled_images:
+        input_img = sampled_image.as_predictable(resize_x=args.model_input_size_x, resize_y=args.model_input_size_y)
+        prediction = model.predict(input_img, verbose=1 if args.verbose else 0)
+        sampled_image.prediction = np.argmax(prediction, axis=3).astype(np.uint8)[0,:,:]
+
+        text_by_label = sampled_image.recognize_text(prune_chars_regex=[r"^\s*.{,2}\s*$",r"[\x00-\x1f\x7f-\x9f\|\_]"],
+                                                     prediction_languages=tesseract_languages,
+                                                     masked_images_dir=masked_images_dir)
+        name_text = text_by_label.get('name_overlay').strip() + " " if text_by_label.get('name_overlay') else ""
+        description_text = f"({text_by_label.get('description_overlay').strip()})" if text_by_label.get('description_overlay') else ""
+        subtitle_text = name_text + description_text
+        if subtitle_text:
+            subtitle.append(subtitle_text, offset_ms=sampled_image.frame_ms, duration_ms=1.0/sampling_rate*1000)
+    return subtitle.generate()
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=args.port, log_level="debug" if args.verbose else "info")
-
-"""
-log.info(f"Classifying video data from {args.video_filepath} with sampling rate of {args.sampling_rate} fps")
-
-cap = cv.VideoCapture(args.video_filepath)
-fps = round(cap.get(cv.CAP_PROP_FPS))
-hop = round(fps / args.sampling_rate)
-
-log.info(f"Video has {fps} fps, sampling every {hop}th frame.")
-
-counter = 0
-frame_counter = 0
-sampled_images = []
-
-while True:
-  success, frame = cap.read()
-  if success:
-    if frame_counter % hop == 0:
-      timestamp = cap.get(cv.CAP_PROP_POS_MSEC)
-      sampled_images.append(SampledImage(data=frame,
-                                         video_filepath=args.video_filepath,
-                                         frame_number=frame_counter,
-                                         frame_ms=timestamp))
-      log.debug(f"Sampled frame {frame_counter} at {timestamp:0.0f} ms")
-  else:
-    raise Exception(f"CV2 failed to read from video {args.video_filepath}")
-  if counter > 1420:
-    break
-  counter += 1
-  frame_counter += 1
-
-model = keras.models.load_model(args.model_filepath)
-subtitle = Subtitle()
-for sampled_image in sampled_images:
-  input_img = sampled_image.as_predictable(resize_x=args.model_input_size_x, resize_y=args.model_input_size_y)
-  prediction = model.predict(input_img, verbose=1 if args.verbose else 0)
-  sampled_image.prediction = np.argmax(prediction, axis=3).astype(np.uint8)[0,:,:]
-  text_by_label = sampled_image.recognize_text(prune_chars_regex=[r"^\s*.{,2}\s*$",r"[\x00-\x1f\x7f-\x9f\|\_]"], debug_image_dir="./temp")
-  name_text = text_by_label.get('name_overlay').strip() + " " if text_by_label.get('name_overlay') else ""
-  description_text = f"({text_by_label.get('description_overlay').strip()})" if text_by_label.get('description_overlay') else ""
-  subtitle_text = name_text + description_text
-  if subtitle_text:
-      subtitle.append(subtitle_text, offset_ms=sampled_image.frame_ms, duration_ms=1.0/args.sampling_rate*1000)
-
-print("SUBTITLES: ")
-print(subtitle.generate())
-"""
+    if args.interactive:
+        temp_dir = os.path.join(args.temp_dir, str(uuid.uuid4()))
+        os.makedirs(temp_dir, exist_ok=True)
+        process_videofile(filepath=args.video_filepath, temp_dir=temp_dir, sampling_rate=args.sampling_rate, masked_images_dir=args.masked_images_dir)
+    else:
+        uvicorn.run("main:app", host="0.0.0.0", port=args.port, log_level="debug" if args.verbose else "info")
