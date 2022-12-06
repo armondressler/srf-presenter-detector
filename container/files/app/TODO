@@ -1,3 +1,4 @@
+dnf install tesseract
 #cut mp4
 ffmpeg -ss 00:00:00 -i "tagesschau-vom-04-12-2022-mittagsausgabe.mp4" -to 00:02:00 -c copy 120.mp4
 
