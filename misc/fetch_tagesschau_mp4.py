@@ -5,7 +5,6 @@ __description__ = """Given a URL and a destination dir, fetch the tagesschau in 
 
 import argparse
 import logging
-from msilib.schema import File
 import os
 import re
 
