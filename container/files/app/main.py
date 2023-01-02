@@ -16,20 +16,16 @@ import pytesseract
 import numpy as np
 import jellyfish
 from webvtt import WebVTT, Caption  #webvtt-py==0.4.6
-from webvtt.writers import WebVTTWriter, SRTWriter
+from webvtt.writers import SRTWriter
 import uvicorn
 from fastapi import FastAPI, HTTPException, Path, Query, Request, File, UploadFile, BackgroundTasks
 from fastapi.responses import JSONResponse
 
 
 class Subtitle:
-    #constructs a vtt or srt formatted set of subtitles
-    #image gets parsed, self.text_by_label now available
-    #combine all labels (name and description itc) into one string
-    #check if previous subtitle is similar / equal:
-      #extend the previous
-    #add subtitle at timestamp frame_ms
-        
+    """
+    Constructs a vtt or srt formatted set of subtitles
+    """
     def __init__(self, jaro_distance_threshold=0.85):
         self.jaro_distance_threshold = jaro_distance_threshold
         self.elements = []
@@ -90,6 +86,9 @@ class Subtitle:
 
 
 class SampledImage:
+    """
+    Image grabbed from video data
+    """
     prediction_labels = {"default": 0,
                          "description_overlay": 1,
                          "name_overlay": 2,
@@ -104,6 +103,9 @@ class SampledImage:
         self.text_by_label = {}
 
     def as_predictable(self, normalize=True, expand=True, resize_x=256, resize_y=256):
+        """
+        Resize / Transform image so it can serve as input for the unet model
+        """
         img = self.data
         if resize_x is not None:
             img = cv.resize(img, (resize_y, resize_x))
@@ -121,6 +123,7 @@ class SampledImage:
                        prune_chars_regex=[r"[\x00-\x1f\x7f-\x9f\|\_]"],
                        masked_images_dir=None):
         """
+        Find text in image data.
         For each item in predict_text_in_labels:
           Apply a mask on the image, ensuring only pixels of class $item are visible
           Apply ocr on masked picture
@@ -146,8 +149,14 @@ class SampledImage:
         return self.text_by_label
 
 
-    def apply_mask(self, show_class, mask_value=0, convert_to_black_white=True, black_white_threshold=120, invert_colors=True):
+    def apply_mask(self,
+                   show_class,
+                   mask_value=0,
+                   convert_to_black_white=True,
+                   black_white_threshold=120,
+                   invert_colors=True):
         """
+        Masks every pixel not classified as class show_class to value mask_value.
         Resize self.prediction to the size of self.data
         If a pixel on self.prediction has a value not equals show_class:
             Zero the corresponding pixel in self.data
@@ -320,8 +329,8 @@ def task_response(task):
 async def version():
     return __version__
 
-@app.get("/generate-subtitles/{task_id}")
-async def fetch_subtitles(task_id, status_code=200):
+@app.get("/generate-subtitles/{task_id}", status_code=200)
+async def fetch_subtitles(task_id):
     task = processing_tasks.get(task_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
@@ -330,10 +339,14 @@ async def fetch_subtitles(task_id, status_code=200):
             raise HTTPException(status_code=500, detail=task.error)
     return task_response(task)
         
-@app.post("/generate-subtitles")
-async def generate_subtitles(background_tasks: BackgroundTasks, caption_format=Query(default="vtt"), file: UploadFile = File(...), status_code=202):
+@app.post("/generate-subtitles", status_code=202)
+async def generate_subtitles(background_tasks: BackgroundTasks, caption_format=Query(default="vtt"), sampling_rate=Query(default=args.sampling_rate), file: UploadFile = File(...)):
     if caption_format not in ("vtt", "srt"):
         raise HTTPException(status_code=400, detail=f"Bad caption format (available: vtt, srt)")
+    if 0.05 >= sampling_rate >= 5:
+        raise HTTPException(status_code=400, detail=f"Bad sampling rate (min: 0.05, max: 5)")
+    if not file.filename.endswith(".mp4"):
+        raise HTTPException(status_code=400, detail=f"Bad video file (filename must end with .mp4)")
     request_id = str(uuid.uuid4())
     temp_dir = os.path.join(args.temp_dir, request_id)
     os.makedirs(temp_dir, exist_ok=True)
@@ -352,6 +365,9 @@ async def generate_subtitles(background_tasks: BackgroundTasks, caption_format=Q
 
 def capture_sample_images(filepath,
                           sampling_rate):
+    """
+    Grab frames from video at a rate of sampling_rate (images per second of videodata)
+    """
     cap = cv.VideoCapture(filepath)
     fps = round(cap.get(cv.CAP_PROP_FPS))
     hop = round(fps / sampling_rate)
