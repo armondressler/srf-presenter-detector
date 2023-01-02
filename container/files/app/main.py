@@ -5,6 +5,7 @@ import shutil
 import logging
 import uuid
 import re
+from datetime import datetime
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2" #tf is really noisy otherwise
 import tensorflow as tf
@@ -17,7 +18,8 @@ import jellyfish
 from webvtt import WebVTT, Caption  #webvtt-py==0.4.6
 from webvtt.writers import WebVTTWriter, SRTWriter
 import uvicorn
-from fastapi import FastAPI, HTTPException, Path, Query, Request, File, UploadFile
+from fastapi import FastAPI, HTTPException, Path, Query, Request, File, UploadFile, BackgroundTasks
+from fastapi.responses import JSONResponse
 
 
 class Subtitle:
@@ -80,7 +82,9 @@ class Subtitle:
         if formatting == "vtt":
             return vtt.content
         elif formatting == "srt":
-            pass
+            ff = FakeFile()
+            SRTWriter().write(vtt.captions, ff)
+            return ff.content
         else:
             raise ValueError(f"Unknown subtitle format {formatting}")
 
@@ -133,6 +137,7 @@ class SampledImage:
             text = pytesseract.image_to_string(masked_img, lang=tesseract_languages)
             for regex in prune_chars_regex:
                 text = re.sub(regex, '', text)
+            text = text.strip()
             if masked_images_dir:
                 debug_img_path = os.path.join(masked_images_dir, f"framenr_{self.frame_number}_framems_{int(self.frame_ms)}_label_{label}.jpg")
                 log.debug(f"Writing masked image to {debug_img_path} (Text: {text})")
@@ -162,11 +167,56 @@ class SampledImage:
         return masked_img
 
 
+class ProcessingTask:
+    """
+    Used to eventually contain results (subtitles) created from video processing
+    """
+    def __init__(self, task_id):
+        self.id = task_id
+        self.state = "created"
+        self.error = None
+        self.duration_ms = None
+        self.creation_date = datetime.now()
+        self.processing_date = None
+        self.results = None
+
+    def is_done(self):
+        return self.state in ("completed","error")
+
+    def set_processing(self):
+        self.processing_date = datetime.now()
+        self.state = "processing"
+
+    def set_completed(self, results):
+        if self.state != "processing":
+            raise ValueError("Cannot complete task before processing")
+        self.duration_ms = datetime.now() - self.processing_date
+        self.results = results
+        self.state = "completed"
+
+    def set_error(self, message=None):
+        self.error = message if message else ""
+        self.state = "error"
+
+class FakeFile:
+    """
+    Because webvtt-py really wants to write SRT formatted subtitles to disk and we dont need that...
+    """
+    def __init__(self):
+        self.content = []
+
+    def write(self, message):
+        self.content.append(message)
+
+    def writelines(self, messages):
+        self.content.extend(messages)
+
+
 parser = argparse.ArgumentParser()
 parser.add_argument("-m",
                     "--model-filepath",
                     type=str,
-                    default="./tagesschau_unet.h5",
+                    default=os.environ.get("SPD_MODEL_FILEPATH", "./tagesschau_unet.h5"),
                     help="Path to the file containing the model in h5 format.")
 parser.add_argument("-x",
                     "--model-input-size-x",
@@ -188,20 +238,24 @@ parser.add_argument("--masked-images-dir",
                     help="Useful for debugging, directory to place masked images in.")
 parser.add_argument("--sampling-rate",
                     type=float,
-                    default=0.4,
+                    default=os.environ.get('SPD_SAMPLING_RATE', 0.4),
                     help="Rate in frames per second at which to grab frames for classification.")
 parser.add_argument("--video-filepath",
                     type=str,
                     default="./tagesschau-vom-04-12-2022-mittagsausgabe.mp4", #TODO deleteme
-                    help="Path of video file to classify.")
+                    help="Path of video file to classify. Only used in interactive mode.")
 parser.add_argument("--tesseract-filepath",
                     type=str,
-                    default="/usr/bin/tesseract",
+                    default=os.environ.get("SPD_TESSERACT_FILEPATH", "/usr/bin/tesseract"),
                     help="Path to tesseract ocr binary.")
 parser.add_argument("--tesseract-languages",
                     action="append",
                     default=["deu","eng","fra"],
                     help="Languages to configure tesseract with, see https://tesseract-ocr.github.io/tessdoc/Data-Files-in-different-versions.html")
+parser.add_argument("--caption-format",
+                    default="vtt",
+                    choices=["vtt","srt"],
+                    help="Either vtt (https://developer.mozilla.org/en-US/docs/Web/API/WebVTT_API) or srt (https://en.wikipedia.org/wiki/SubRip)")
 parser.add_argument("-v",
                     "--verbose",
                     default=False,
@@ -213,7 +267,7 @@ parser.add_argument("--interactive",
                     help="Dont launch fastapi server")
 parser.add_argument('--port',
                     type=int,
-                    default=int(os.environ.get("APP_PORT", 8080)),
+                    default=int(os.environ.get("SPD_APP_PORT", 8080)),
                     help="Run api on this port.")
 args = parser.parse_args()
 
@@ -227,11 +281,12 @@ logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                     datefmt="%d-%b-%y %H:%M:%S")
 log = logging.getLogger()
 
-if not os.access(args.video_filepath, os.R_OK):
+if args.interactive and not os.access(args.video_filepath, os.R_OK):
   raise FileNotFoundError(f"Failed to read from video file at {args.video_filepath}")
 
 if not os.access(args.model_filepath, os.R_OK):
   raise FileNotFoundError(f"Failed to open classification model at {args.model_filepath}")
+keras_model = keras.models.load_model(args.model_filepath)
 
 if not os.access(args.tesseract_filepath, os.X_OK):
   raise FileNotFoundError(f"Failed to execute tesseract at {args.tesseract_filepath}")
@@ -241,6 +296,7 @@ try:
 except FileNotFoundError:
   pass
 
+processing_tasks = {}
 
 app = FastAPI(title="SRF Tagesschau Classifier 9000",
               description="Samples image data from tagesschau sessions and adds subtitle cues for text presented in overlays",
@@ -249,13 +305,37 @@ app = FastAPI(title="SRF Tagesschau Classifier 9000",
                        "url": "https://github.com/armondressler/srf-presenter-detector",
                        "email": "armon.dressler@stud.hslu.ch"})
 
+def task_response(task):
+    return {
+            "id": task.id,
+            "processing_done": task.is_done(),
+            "error": task.error or "",
+            "creation_date": task.creation_date.isoformat(),
+            "processing_date": task.processing_date.isoformat() if task.processing_date else "",
+            "duration_ms": task.duration_ms or 0,
+            "results": task.results or ""
+            }
+
 @app.get("/version")
 async def version():
     return __version__
 
-@app.post("/generate-vtt")
-async def generate_vtt(file: UploadFile = File(...)):
-    temp_dir = os.path.join(args.temp_dir, str(uuid.uuid4()))
+@app.get("/generate-subtitles/{task_id}")
+async def fetch_subtitles(task_id, status_code=200):
+    task = processing_tasks.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    if not task.is_done():
+        if task.error is not None:
+            raise HTTPException(status_code=500, detail=task.error)
+    return task_response(task)
+        
+@app.post("/generate-subtitles")
+async def generate_subtitles(background_tasks: BackgroundTasks, caption_format=Query(default="vtt"), file: UploadFile = File(...), status_code=202):
+    if caption_format not in ("vtt", "srt"):
+        raise HTTPException(status_code=400, detail=f"Bad caption format (available: vtt, srt)")
+    request_id = str(uuid.uuid4())
+    temp_dir = os.path.join(args.temp_dir, request_id)
     os.makedirs(temp_dir, exist_ok=True)
     video_filepath = os.path.join(temp_dir, file.filename)
     try:
@@ -265,12 +345,13 @@ async def generate_vtt(file: UploadFile = File(...)):
         return {"message": "There was an error uploading the file"}
     finally:
         file.file.close()
-    subtitles = process_videofile(filepath=video_filepath, temp_dir=temp_dir)
-    return {"VTT": f"{subtitles}"}
+    task = ProcessingTask(task_id=request_id)
+    processing_tasks[request_id] = task
+    background_tasks.add_task(process_videofile, video_filepath, caption_format=caption_format, processing_task=task)
+    return JSONResponse(content=task_response(task)) 
 
-def process_videofile(filepath, temp_dir="/tmp", sampling_rate=0.4, tesseract_languages=["deu","fra","eng"], masked_images_dir=None):
-    log.info(f"Classifying video data from {filepath} with sampling rate of {args.sampling_rate} fps")
-    
+def capture_sample_images(filepath,
+                          sampling_rate):
     cap = cv.VideoCapture(filepath)
     fps = round(cap.get(cv.CAP_PROP_FPS))
     hop = round(fps / sampling_rate)
@@ -279,26 +360,50 @@ def process_videofile(filepath, temp_dir="/tmp", sampling_rate=0.4, tesseract_la
     sampled_images = []
     frame_read_success, frame = cap.read()
     frame_counter = 0
-
+    
     while frame_read_success:
         if frame_counter % hop == 0:
-            timestamp = cap.get(cv.CAP_PROP_POS_MSEC)
+            timestamp = cap.get(cv.CAP_PROP_POS_MSEC) #no idea how this should work with concurrent captures
             sampled_images.append(SampledImage(data=frame,
-                                               video_filepath=args.video_filepath,
+                                               video_filepath=filepath,
                                                frame_number=frame_counter,
                                                frame_ms=timestamp))
             log.debug(f"Sampled frame {frame_counter} at {timestamp:0.0f} ms")
         frame_read_success, frame = cap.read()
         frame_counter += 1
-    
-    model = keras.models.load_model(args.model_filepath)
+    return sampled_images
+ 
+def process_videofile(filepath,
+                      keras_model=keras_model,
+                      caption_format="vtt",
+                      sampling_rate=args.sampling_rate,
+                      tesseract_languages=args.tesseract_languages,
+                      masked_images_dir=args.masked_images_dir if args.masked_images_dir else None,
+                      processing_task=None,
+                      verbose=args.verbose):
+    """
+    Turns a video into subtitles, magic really.
+    keras_model is a loaded model to be used for image segmentation
+    processing_task is only used in concert with the rest api
+    other options are documented as part of the cli parameters
+    """
+    log.info(f"Classifying video data from {filepath} with sampling rate of {sampling_rate} fps")
+    if processing_task is not None:
+        processing_task.set_processing()
+    sampled_images = capture_sample_images(filepath, sampling_rate)
+    try:
+        os.remove(filepath)
+        log.debug(f"Removed video file at {filepath} after processing")
+    except FileNotFoundError:
+        pass
     subtitle = Subtitle()
+    log.info(f"Running segmentation on {len(sampled_images)} frames")
     for sampled_image in sampled_images:
         input_img = sampled_image.as_predictable(resize_x=args.model_input_size_x, resize_y=args.model_input_size_y)
-        log.debug(f"Running segmentation with model {args.model_filepath} for frame {sampled_image.frame_number}")
-        prediction = model.predict(input_img, verbose=1 if args.verbose else 0)
+        log.debug(f"Running segmentation on frame {sampled_image.frame_number}")
+        prediction = keras_model.predict(input_img, verbose=1 if verbose else 0)
         sampled_image.prediction = np.argmax(prediction, axis=3).astype(np.uint8)[0,:,:]
-
+    
         text_by_label = sampled_image.recognize_text(prune_chars_regex=[r"^\s*.{,2}\s*$",r"[\x00-\x1f\x7f-\x9f\|\_]"],
                                                      prediction_languages=tesseract_languages,
                                                      masked_images_dir=masked_images_dir)
@@ -307,13 +412,16 @@ def process_videofile(filepath, temp_dir="/tmp", sampling_rate=0.4, tesseract_la
         subtitle_text = name_text + description_text
         if subtitle_text:
             subtitle.append(subtitle_text, offset_ms=sampled_image.frame_ms, duration_ms=1.0/sampling_rate*1000)
-    return subtitle.generate()
+    formatted_subtitles = subtitle.generate(formatting=caption_format)
+    log.info(f"Finished processing, generated {len(formatted_subtitles)} subtitles")
+    if processing_task is not None:
+        processing_task.set_completed(results={caption_format:formatted_subtitles})
+        return
+    return formatted_subtitles
 
 if __name__ == "__main__":
     if args.interactive:
-        temp_dir = os.path.join(args.temp_dir, str(uuid.uuid4()))
-        os.makedirs(temp_dir, exist_ok=True)
-        subtitles = process_videofile(filepath=args.video_filepath, temp_dir=temp_dir, sampling_rate=args.sampling_rate, masked_images_dir=args.masked_images_dir)
+        subtitles = process_videofile(filepath=args.video_filepath, caption_format=args.caption_format, sampling_rate=args.sampling_rate, masked_images_dir=args.masked_images_dir)
         log.info("Processing done, outputting subtitles")
         print(f"\n{subtitles}")
     else:

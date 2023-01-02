@@ -12,10 +12,13 @@ COPY ./files/app /app
 COPY ./files/model /model
 
 RUN groupadd -g 1000 uvicorn && \
-    useradd -m -u 1000 -g uvicorn uvicorn
+    useradd -m -u 1000 -g uvicorn uvicorn && \
+    chown -R uvicorn:uvicorn /app /model
+
+USER uvicorn
 
 WORKDIR /app
 
 EXPOSE 8080
 	
-CMD ["python3", "main.py"]
+CMD ["python3", "main.py", "--model-filepath", "/model/tagesschau_unet.h5"]
