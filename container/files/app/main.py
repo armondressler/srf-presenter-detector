@@ -18,8 +18,8 @@ import jellyfish
 from webvtt import WebVTT, Caption  #webvtt-py==0.4.6
 from webvtt.writers import SRTWriter
 import uvicorn
-from fastapi import FastAPI, HTTPException, Path, Query, Request, File, UploadFile, BackgroundTasks
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, Path, Query, Request, File, UploadFile, BackgroundTasks, Form
+from fastapi.responses import JSONResponse, FileResponse
 
 
 class Subtitle:
@@ -183,6 +183,7 @@ class ProcessingTask:
     def __init__(self, task_id):
         self.id = task_id
         self.state = "created"
+        self.completion_pct = 0
         self.error = None
         self.duration_ms = None
         self.creation_date = datetime.now()
@@ -192,14 +193,18 @@ class ProcessingTask:
     def is_done(self):
         return self.state in ("completed","error")
 
-    def set_processing(self):
-        self.processing_date = datetime.now()
-        self.state = "processing"
+    def set_processing(self, completion_pct=None):
+        if completion_pct:
+            self.completion_pct = completion_pct
+        if self.processing_date is None:
+            self.processing_date = datetime.now()
+            self.state = "processing"
 
     def set_completed(self, results):
         if self.state != "processing":
             raise ValueError("Cannot complete task before processing")
         self.duration_ms = datetime.now() - self.processing_date
+        self.completion_pct = 100
         self.results = results
         self.state = "completed"
 
@@ -318,6 +323,7 @@ def task_response(task):
     return {
             "id": task.id,
             "processing_done": task.is_done(),
+            "completion_pct": task.completion_pct,
             "error": task.error or "",
             "creation_date": task.creation_date.isoformat(),
             "processing_date": task.processing_date.isoformat() if task.processing_date else "",
@@ -328,6 +334,10 @@ def task_response(task):
 @app.get("/version")
 async def version():
     return __version__
+
+@app.get("/")
+async def subtitles_demo():
+    return FileResponse('./html/demo.html')
 
 @app.get("/generate-subtitles/{task_id}", status_code=200)
 async def fetch_subtitles(task_id):
@@ -340,7 +350,14 @@ async def fetch_subtitles(task_id):
     return task_response(task)
         
 @app.post("/generate-subtitles", status_code=202)
-async def generate_subtitles(background_tasks: BackgroundTasks, caption_format=Query(default="vtt"), sampling_rate=Query(default=args.sampling_rate), file: UploadFile = File(...)):
+async def generate_subtitles(background_tasks: BackgroundTasks,
+                             caption_format=Query(default="vtt"),
+                             sampling_rate=Query(default=args.sampling_rate),
+                             formcaptionformat=Form(None),
+                             formsamplingrate=Form(None),
+                             file: UploadFile = File(...)):
+    caption_format = formcaptionformat if formcaptionformat else caption_format
+    sampling_rate = formsamplingrate if formsamplingrate else sampling_rate
     if caption_format not in ("vtt", "srt"):
         raise HTTPException(status_code=400, detail=f"Bad caption format (available: vtt, srt)")
     if 0.05 >= sampling_rate >= 5:
@@ -376,7 +393,6 @@ def capture_sample_images(filepath,
     sampled_images = []
     frame_read_success, frame = cap.read()
     frame_counter = 0
-    
     while frame_read_success:
         if frame_counter % hop == 0:
             timestamp = cap.get(cv.CAP_PROP_POS_MSEC) #no idea how this should work with concurrent captures
@@ -405,16 +421,16 @@ def process_videofile(filepath,
     """
     log.info(f"Classifying video data from {filepath} with sampling rate of {sampling_rate} fps")
     if processing_task is not None:
-        processing_task.set_processing()
+        processing_task.set_processing(3) #its the Windows Experience
     sampled_images = capture_sample_images(filepath, sampling_rate)
-    try:
-        os.remove(filepath)
-        log.debug(f"Removed video file at {filepath} after processing")
-    except FileNotFoundError:
-        pass
+    if processing_task is not None:
+        processing_task.set_processing(20)
+    os.remove(filepath)
+    log.debug(f"Removed video file at {filepath} after processing")
+
     subtitle = Subtitle()
     log.info(f"Running segmentation on {len(sampled_images)} frames")
-    for sampled_image in sampled_images:
+    for sampled_image_index, sampled_image in enumerate(sampled_images, start=1):
         input_img = sampled_image.as_predictable(resize_x=args.model_input_size_x, resize_y=args.model_input_size_y)
         log.debug(f"Running segmentation on frame {sampled_image.frame_number}")
         prediction = keras_model.predict(input_img, verbose=1 if verbose else 0)
@@ -428,8 +444,10 @@ def process_videofile(filepath,
         subtitle_text = name_text + description_text
         if subtitle_text:
             subtitle.append(subtitle_text, offset_ms=sampled_image.frame_ms, duration_ms=1.0/sampling_rate*1000)
+        if processing_task is not None:
+            processing_task.set_processing(sampled_image_index/len(sampled_images)*80+20)
     formatted_subtitles = subtitle.generate(formatting=caption_format)
-    log.info(f"Finished processing, generated {len(formatted_subtitles)} subtitles")
+    log.info(f"Finished processing, generated subtitles")
     if processing_task is not None:
         processing_task.set_completed(results={caption_format:formatted_subtitles})
         return

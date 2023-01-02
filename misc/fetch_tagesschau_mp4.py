@@ -65,7 +65,7 @@ if not os.path.isdir(args.download_dir):
 os.chdir(args.download_dir)
 root_dir = os.getcwd()
 
-for directory in ("original","downscaled","images", "labels"):
+for directory in ("original","downscaled","images", "labels", "sample_images"):
     try:
         os.mkdir(os.path.join(root_dir, directory))
     except FileExistsError:
