@@ -19,7 +19,8 @@ from webvtt import WebVTT, Caption  #webvtt-py==0.4.6
 from webvtt.writers import SRTWriter
 import uvicorn
 from fastapi import FastAPI, HTTPException, Path, Query, Request, File, UploadFile, BackgroundTasks, Form
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 
 
 class Subtitle:
@@ -80,7 +81,7 @@ class Subtitle:
         elif formatting == "srt":
             ff = FakeFile()
             SRTWriter().write(vtt.captions, ff)
-            return ff.content
+            return "\n".join(ff.content)
         else:
             raise ValueError(f"Unknown subtitle format {formatting}")
 
@@ -331,6 +332,8 @@ def task_response(task):
             "results": task.results or ""
             }
 
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
 @app.get("/version")
 async def version():
     return __version__
@@ -338,6 +341,17 @@ async def version():
 @app.get("/")
 async def subtitles_demo():
     return FileResponse('./html/demo.html')
+
+@app.get("/download-subtitles/{task_id}", response_class=PlainTextResponse)
+async def download_subtitles(task_id):
+    task = processing_tasks.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    if not task.is_done():
+        if task.error is not None:
+            raise HTTPException(status_code=500, detail=task.error)
+        raise HTTPException(status_code=404, detail="Video classification still in progress")
+    return task.results.get("vtt") or task.results.get("srt")
 
 @app.get("/generate-subtitles/{task_id}", status_code=200)
 async def fetch_subtitles(task_id):
@@ -421,7 +435,7 @@ def process_videofile(filepath,
     """
     log.info(f"Classifying video data from {filepath} with sampling rate of {sampling_rate} fps")
     if processing_task is not None:
-        processing_task.set_processing(3) #its the Windows Experience
+        processing_task.set_processing(5) #its the Windows Experience
     sampled_images = capture_sample_images(filepath, sampling_rate)
     if processing_task is not None:
         processing_task.set_processing(20)
@@ -445,7 +459,7 @@ def process_videofile(filepath,
         if subtitle_text:
             subtitle.append(subtitle_text, offset_ms=sampled_image.frame_ms, duration_ms=1.0/sampling_rate*1000)
         if processing_task is not None:
-            processing_task.set_processing(sampled_image_index/len(sampled_images)*80+20)
+            processing_task.set_processing(sampled_image_index/len(sampled_images)*80+20) #progress meter trickery
     formatted_subtitles = subtitle.generate(formatting=caption_format)
     log.info(f"Finished processing, generated subtitles")
     if processing_task is not None:
