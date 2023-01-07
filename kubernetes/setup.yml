@@ -1,0 +1,114 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: srf-presenter-detector
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: srf-presenter-detector
+  name: srf-presenter-detector
+  namespace: srf-presenter-detector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: srf-presenter-detector
+  template:
+    metadata:
+      labels:
+        app: srf-presenter-detector
+    spec:
+      containers:
+      - image: docker.io/armondressler/srf-presenter-detector:1.0
+        name: srf-presenter-detector
+        resources:
+          limits:
+            cpu: 4000m
+            memory: 6Gi
+            ephemeral-storage: 4Gi
+          requests:
+            cpu: 3000m
+            memory: 4Gi
+            ephemeral-storage: 4Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: srf-presenter-detector
+  name: srf-presenter-detector
+  namespace: srf-presenter-detector
+spec:
+  type: ClusterIP
+  selector:
+    app: srf-presenter-detector
+  ports:
+  - port: 8080
+    protocol: TCP
+    targetPort: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    cert-manager.io/issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/proxy-body-size: "1500m"
+    nginx.ingress.kubernetes.io/affinity: "cookie"
+    nginx.ingress.kubernetes.io/session-cookie-name: "srf-guetsli"
+    nginx.ingress.kubernetes.io/session-cookie-expires: "172800"
+    nginx.ingress.kubernetes.io/session-cookie-max-age: "172800"
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/affinity-mode: "persistent"
+    nginx.ingress.kubernetes.io/session-cookie-hash: "sha1"
+  name: srf-presenter-detector
+  namespace: srf-presenter-detector
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+      - srf.voxte.ch
+      secretName: srf-voxte-ch-tls
+  rules:
+    - host: srf.voxte.ch
+      http:
+        paths:
+          - pathType: Prefix
+            backend:
+              service:
+                name: srf-presenter-detector
+                port:
+                  number: 8080
+            path: /
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: letsencrypt-prod
+  namespace: srf-presenter-detector
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: armon.dressler@gmail.com
+    privateKeySecretRef:
+      name: letsencrypt-prod
+    solvers:
+    - http01:
+        ingress:
+          class: nginx
+---
+apiVersion: autoscaling/v1
+kind: HorizontalPodAutoscaler
+metadata:
+  name: cpu-scaler
+  namespace: srf-presenter-detector
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: srf-presenter-detector
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 50
