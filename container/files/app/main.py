@@ -257,7 +257,6 @@ parser.add_argument("--sampling-rate",
                     help="Rate in frames per second at which to grab frames for classification.")
 parser.add_argument("--video-filepath",
                     type=str,
-                    default="./tagesschau-vom-04-12-2022-mittagsausgabe.mp4", #TODO deleteme
                     help="Path of video file to classify. Only used in interactive mode.")
 parser.add_argument("--tesseract-filepath",
                     type=str,
@@ -439,9 +438,8 @@ def process_videofile(filepath,
     sampled_images = capture_sample_images(filepath, sampling_rate)
     if processing_task is not None:
         processing_task.set_processing(20)
-    os.remove(filepath)
-    log.debug(f"Removed video file at {filepath} after processing")
-
+        os.remove(filepath)
+        log.debug(f"Removed video file at {filepath} after processing")
     subtitle = Subtitle()
     log.info(f"Running segmentation on {len(sampled_images)} frames")
     for sampled_image_index, sampled_image in enumerate(sampled_images, start=1):
