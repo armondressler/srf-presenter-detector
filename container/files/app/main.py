@@ -27,7 +27,7 @@ class Subtitle:
     """
     Constructs a vtt or srt formatted set of subtitles
     """
-    def __init__(self, jaro_distance_threshold=0.85):
+    def __init__(self, jaro_distance_threshold=0.75):
         self.jaro_distance_threshold = jaro_distance_threshold
         self.elements = []
 
@@ -373,6 +373,10 @@ async def generate_subtitles(background_tasks: BackgroundTasks,
     sampling_rate = formsamplingrate if formsamplingrate else sampling_rate
     if caption_format not in ("vtt", "srt"):
         raise HTTPException(status_code=400, detail=f"Bad caption format (available: vtt, srt)")
+    try:
+        sampling_rate = float(sampling_rate)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid sampling rate.")
     if 0.05 >= sampling_rate >= 5:
         raise HTTPException(status_code=400, detail=f"Bad sampling rate (min: 0.05, max: 5)")
     if not file.filename.endswith(".mp4"):
@@ -390,7 +394,7 @@ async def generate_subtitles(background_tasks: BackgroundTasks,
         file.file.close()
     task = ProcessingTask(task_id=request_id)
     processing_tasks[request_id] = task
-    background_tasks.add_task(process_videofile, video_filepath, caption_format=caption_format, processing_task=task)
+    background_tasks.add_task(process_videofile, video_filepath, caption_format=caption_format, sampling_rate=sampling_rate, processing_task=task)
     return JSONResponse(content=task_response(task)) 
 
 def capture_sample_images(filepath,
@@ -448,7 +452,7 @@ def process_videofile(filepath,
         prediction = keras_model.predict(input_img, verbose=1 if verbose else 0)
         sampled_image.prediction = np.argmax(prediction, axis=3).astype(np.uint8)[0,:,:]
     
-        text_by_label = sampled_image.recognize_text(prune_chars_regex=[r"^\s*.{,2}\s*$",r"[\x00-\x1f\x7f-\x9f\|\_]"],
+        text_by_label = sampled_image.recognize_text(prune_chars_regex=[r"[\x00-\x1f\x7f-\x9f\|\_~\\]",r"^\s*.{,2}\s*$"],
                                                      prediction_languages=tesseract_languages,
                                                      masked_images_dir=masked_images_dir)
         name_text = text_by_label.get('name_overlay').strip() + " " if text_by_label.get('name_overlay') else ""
