@@ -135,7 +135,7 @@ class SampledImage:
             if label not in SampledImage.prediction_labels.keys():
                 raise ValueError(f"Cannot predict text for unknown label {label}")
             if label == "description_overlay": #descriptions are black text on grey background, hardcoded here due to project time constraints
-                masked_img = self.apply_mask(show_class=SampledImage.prediction_labels[label], black_white_threshold=140, invert_colors=False)
+                masked_img = self.apply_mask(show_class=SampledImage.prediction_labels[label], black_white_threshold=150, invert_colors=False)
             else:
                 masked_img = self.apply_mask(show_class=SampledImage.prediction_labels[label])
             text = pytesseract.image_to_string(masked_img, lang=tesseract_languages)
@@ -170,7 +170,7 @@ class SampledImage:
         data_dimension_x, data_dimension_y = self.data.shape[1], self.data.shape[0]
         upscaled_prediction = cv.resize(self.prediction, (data_dimension_x, data_dimension_y))
         upscaled_prediction = np.expand_dims(upscaled_prediction, 2) #self.data has a third dimension for RGB, equal shapes required for np.where
-        masked_img = np.where(upscaled_prediction == show_class, self.data, 0) 
+        masked_img = np.where(upscaled_prediction == show_class, self.data, mask_value) 
         if convert_to_black_white:
             masked_img = cv.cvtColor(masked_img, cv.COLOR_BGR2GRAY)
             _, masked_img = cv.threshold(masked_img, black_white_threshold, 255, cv.THRESH_BINARY_INV if invert_colors else cv.THRESH_BINARY)
@@ -446,12 +446,14 @@ def process_videofile(filepath,
         log.debug(f"Removed video file at {filepath} after processing")
     subtitle = Subtitle()
     log.info(f"Running segmentation on {len(sampled_images)} frames")
-    for sampled_image_index, sampled_image in enumerate(sampled_images, start=1):
-        input_img = sampled_image.as_predictable(resize_x=args.model_input_size_x, resize_y=args.model_input_size_y)
-        log.debug(f"Running segmentation on frame {sampled_image.frame_number}")
-        prediction = keras_model.predict(input_img, verbose=1 if verbose else 0)
+    predictable_images = [sampled_image.as_predictable(resize_x=args.model_input_size_x, resize_y=args.model_input_size_y) for sampled_image in sampled_images]
+    predictions = [keras_model.predict(predictable_image, verbose=1 if verbose else 0) for predictable_image in predictable_images]
+    if processing_task is not None:
+        processing_task.set_processing(40)
+    subtitle = Subtitle()
+    for sampled_image_index, (sampled_image, prediction) in enumerate(zip(sampled_images, predictions), start=1):
         sampled_image.prediction = np.argmax(prediction, axis=3).astype(np.uint8)[0,:,:]
-    
+        log.debug(f"Running segmentation on frame {sampled_image.frame_number}")
         text_by_label = sampled_image.recognize_text(prune_chars_regex=[r"[\x00-\x1f\x7f-\x9f\|\_~\\]",r"^\s*.{,2}\s*$"],
                                                      prediction_languages=tesseract_languages,
                                                      masked_images_dir=masked_images_dir)
@@ -461,7 +463,7 @@ def process_videofile(filepath,
         if subtitle_text:
             subtitle.append(subtitle_text, offset_ms=sampled_image.frame_ms, duration_ms=1.0/sampling_rate*1000)
         if processing_task is not None:
-            processing_task.set_processing(sampled_image_index/len(sampled_images)*80+20) #progress meter trickery
+            processing_task.set_processing(sampled_image_index/len(sampled_images)*60+40) #progress meter trickery
     formatted_subtitles = subtitle.generate(formatting=caption_format)
     log.info(f"Finished processing, generated subtitles")
     if processing_task is not None:
