@@ -35,15 +35,15 @@
   <body>
     
 <main>
-  <div class="container py-3">
-    <header class="pb-3 mb-4 border-bottom">
-      <a href="/" class="d-flex align-items-center text-dark text-decoration-none">
-        <span class="fs-4">Demo</span>
-	<img src="/static/images/afe2_logo.png" class="img-fluid ms-auto" style="width: auto; height: 8rem;" alt="...">
-      </a>
+  <div class="container py-1">
+    <header class="pb-3 mb-2 border-bottom">
+      <div class="d-flex text-dark text-decoration-none align-items-center">
+        <span class="fs-2">Demo</span>
+	<a class="ms-auto" href="https://www.hslu.ch"><img src="/static/images/afe2_logo.png" class="img-fluid" style="width: auto; height: 10rem;" alt="..."></a>
+      </div>
     </header>
 
-    <div class="p-5 mb-4 bg-light rounded-3">
+    <div class="p-5 mb-4 bg-light border rounded-3">
       <div class="container-fluid py-3">
         <h1 class="display-5 fw-bold">Untertitel erstellen</h1>
         <p class="col-md-8 fs-4">Tagesschau Sendung als mp4-Datei hochladen.</p>
@@ -97,40 +97,37 @@
       </div>
     </div>
     <div class="row align-items-md-stretch">
-      <div class="h-100 p-5 bg-light border rounded-3">
-        <h2>Beispielvideos</h2>
-        <p>Eine Auswahl von Tagesschau Sendungen.</p>
-        <ul class="icon-list">
-          <li><a href="https://drive.google.com/file/d/1-uEHGKJmY-__VHk990uyxX1L41x0Odes/view?usp=sharing">Mittagsausgabe vom 23.12.22</a></li>
-          <li><a href="https://drive.google.com/file/d/1DfrtnBZlWogUjM2_onN0q8NpRe0N8J0E/view?usp=sharing">Mittagsausgabe vom 4.12.22</a></li>
-          <li><a href="https://drive.google.com/file/d/1Yz7VlhjYNRYJJtbt-CfGQz1ISAV37Syy/view?usp=sharing">Mittagsausgabe vom 26.12.22</a></li>
-          <li><a href="https://drive.google.com/file/d/1l36bDco2IBmZTIttovEso-1ZLGadpJ32/view?usp=sharing">Mittagsausgabe vom 18.12.22</a></li>
-          <li><a href="https://drive.google.com/file/d/1v5xzC70LFw1pfwplkwyJTHBHU4B26fHw/view?usp=sharing">Hauptausgabe vom 4.12.22</a></li>
-          <li><a href="https://drive.google.com/file/d/1xcAh4rypIP4jp8DOIw4kZUZvj4vjXGZP/view?usp=sharing">Spaetausgabe vom 28.12.22</a></li>
-        </ul>
+      <div class="col">
+        <div class="h-100 p-5 bg-light border rounded-3">
+          <h2>Beispielvideos</h2>
+          <p>Eine Auswahl von Tagesschau Sendungen.</p>
+          <ul class="icon-list">
+            <li><a href="https://drive.google.com/file/d/1-uEHGKJmY-__VHk990uyxX1L41x0Odes/view?usp=sharing">Mittagsausgabe vom 23.12.22</a></li>
+            <li><a href="https://drive.google.com/file/d/1DfrtnBZlWogUjM2_onN0q8NpRe0N8J0E/view?usp=sharing">Mittagsausgabe vom 4.12.22</a></li>
+            <li><a href="https://drive.google.com/file/d/1Yz7VlhjYNRYJJtbt-CfGQz1ISAV37Syy/view?usp=sharing">Mittagsausgabe vom 26.12.22</a></li>
+            <li><a href="https://drive.google.com/file/d/1l36bDco2IBmZTIttovEso-1ZLGadpJ32/view?usp=sharing">Mittagsausgabe vom 18.12.22</a></li>
+            <li><a href="https://drive.google.com/file/d/1v5xzC70LFw1pfwplkwyJTHBHU4B26fHw/view?usp=sharing">Hauptausgabe vom 4.12.22</a></li>
+            <li><a href="https://drive.google.com/file/d/1xcAh4rypIP4jp8DOIw4kZUZvj4vjXGZP/view?usp=sharing">Spaetausgabe vom 28.12.22</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="col">
+        <div class="h-100 p-5 bg-light border rounded-3">
+          <h2>Dokumentation</h2>
+          <p>Alle Angaben ohne Gewähr.</p>
+          <ul class="icon-list">
+	    <li><a href="/docs">API Manifest</a></li>
+	    <li><a href="https://github.com/armondressler/srf-presenter-detector">Quellcode</a></li>
+	    <li><a href="https://hub.docker.com/r/armondressler/srf-presenter-detector">OCI Image</a></li>
+	    <li><a href="https://raw.githubusercontent.com/armondressler/srf-presenter-detector/main/LICENSE">Lizenz</a></li>
+          </ul>
+        </div>
       </div>
     </div>
-
-  <footer class="footer mt-auto py-3 bg-light fixed-bottom">
-    <div class="container">
-      <span class="text-muted"><a href="/docs">API Dokumentation</a></span>
-    </div>
-  </footer>
-
   </div>
 </main>
 
 <script>
-
-$('#success-card-view').
-  click(function(e){
-    console.log("VIEWING"); 
-});
-
-$('#success-card-download').
-  click(function(e){
-    console.log("DOWNLOADING"); 
-});
 
 $('#videoupload')
   .submit(function(e){

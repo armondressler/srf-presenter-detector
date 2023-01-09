@@ -288,7 +288,7 @@ args = parser.parse_args()
 
 tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.WARN)
 pytesseract.pytesseract.tesseract_cmd = args.tesseract_filepath
-__version__ = "1.0"
+__version__ = "1.6"
 
 logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                     format="%(asctime)s - %(message)s",
